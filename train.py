@@ -334,6 +334,35 @@ class DiscretizedMixturelogisticLoss(nn.Module):
         assert losses.size() == target.size()
         return ((losses * mask_).sum()) / mask_.sum()
 
+class ProbabilityDensityDistillationLoss(nn.Module):
+    def __init__(self, teacher, c, g):
+        super(ProbabilityDensityDistillationLoss, self).__init__()
+        self.teacher = teacher
+        self.c = c
+        self.g = g
+
+        for param in self.teacher.parameters():
+            param.requires_grad = False
+
+    def forward(self, input, target, lengths=None, mask=None, max_len=None):
+        if lengths is None and mask is None:
+            raise RuntimeError("Should provide either lengths or mask")
+
+        # (B, T, 1)
+        if mask is None:
+            mask = sequence_mask(lengths, max_len).unsqueeze(-1)
+
+        # (B, T, 1)
+        mask_ = mask.expand_as(target)
+
+        y = self.teacher(target, self.c, self.g, False)
+        losses = discretized_mix_logistic_loss(
+            input, y, num_classes=hparams.quantize_channels,
+            log_scale_min=hparams.log_scale_min, reduce=False)
+
+        assert losses.size() == target.size()
+        return ((losses * mask_).sum()) / mask_.sum()
+
 
 def ensure_divisible(length, divisible_by=256, lower=True):
     if length % divisible_by == 0:
@@ -929,7 +958,7 @@ if __name__ == "__main__":
     hparams.parse(args["--hparams"])
     assert hparams.name == "wavenet_vocoder"
     print(hparams_debug_string())
-    
+
     fs = hparams.sample_rate
 
     os.makedirs(checkpoint_dir, exist_ok=True)
