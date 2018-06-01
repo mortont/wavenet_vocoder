@@ -8,7 +8,7 @@ import numpy as np
 hparams = tf.contrib.training.HParams(
     name="wavenet_vocoder",
 
-    # Convenient model builder
+    # Convenient model builder (wavenet or iaf)
     builder="wavenet",
 
     # Input type:
@@ -120,6 +120,9 @@ hparams = tf.contrib.training.HParams(
     # per-epoch interval
     test_eval_epoch_interval=5,
     save_optimizer_state=True,
+
+    # location of pretrained teacher model
+    teacher_path=None
 
     # Eval:
 )
