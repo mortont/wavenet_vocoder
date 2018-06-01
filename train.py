@@ -286,7 +286,7 @@ class ExponentialMovingAverage(object):
 
 def clone_as_averaged_model(device, model, ema):
     assert ema is not None
-    averaged_model = build_model().to(device)
+    averaged_model = build_model(hparams.builder).to(device)
     averaged_model.load_state_dict(model.state_dict())
     for name, param in averaged_model.named_parameters():
         if name in ema.shadow:
@@ -723,7 +723,8 @@ def train_loop(device, model, data_loaders, optimizer, writer, checkpoint_dir=No
             criterion = MaskedCrossEntropyLoss()
     else:
         if hparams.builder == 'iaf':
-            teacher = build_model('wavenet')
+            device = torch.device("cuda" if use_cuda else "cpu")
+            teacher = build_model('wavenet').to(device)
             restore_parts(hparams.teacher_path, teacher)
             criterion = ProbabilityDensityDistillationLoss(teacher)
         else:
@@ -989,7 +990,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if use_cuda else "cpu")
 
     # Model
-    model = build_model().to(device)
+    model = build_model(hparams.builder).to(device)
 
     if hparams.builder != 'iaf':
         receptive_field = model.receptive_field

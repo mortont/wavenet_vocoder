@@ -4,26 +4,51 @@ from __future__ import with_statement, print_function, absolute_import
 import numpy as np
 
 import torch
-from torch import import nn
+from torch import nn
 from torch.nn import functional as F
 
 from .modules import Embedding
 from .modules import Conv1d1x1, ResidualConv1dGLU, ConvTranspose2d
 from .mixture import sample_from_discretized_mix_logistic
+from .wavenet import _expand_global_features
 
 class IAF(nn.Module):
     """
     Inverse Autoregressive Flow (parallel wavenet)
     """
 
-    def __init__(self):
+    def __init__(self,
+                cin_channels=-1, gin_channels=-1,
+                n_speakers=None,
+                upsample_conditional_features=False,
+                upsample_scales=None,
+                freq_axis_kernel_size=3,
+                use_speaker_embedding=True,
+                ):
         super(IAF, self).__init__()
+        self.cin_channels = cin_channels
+
+        if gin_channels > 0 and use_speaker_embedding:
+            assert n_speakers is not None
+            self.embed_speakers = Embedding(
+                    n_speakers, gin_channels, padding_idx=None, std=0.1)
+        else:
+            self.embed_speakers = None
+
         # NOTE: hardcoding these hparams for now...
         l = [(10, 1), (10, 1), (10, 1), (30, 3)]
         self.wavenet_stack = nn.ModuleList()
         for layers, stacks in l:
             self.wavenet_stack.append(
-                    PWaveNet(layers=layers, stacks=stacks))
+                    PWavenet(layers=layers, stacks=stacks,
+                        cin_channels=cin_channels,
+                        gin_channels=gin_channels,
+                        n_speakers=n_speakers,
+                        upsample_conditional_features=upsample_conditional_features,
+                        upsample_scales=upsample_scales,
+                        freq_axis_kernel_size=freq_axis_kernel_size,
+                        use_speaker_embedding=use_speaker_embedding
+                        ))
 
     def forward(self, x=None, c=None, g=None, softmax=False, lengths=None):
         # NOTE: softmax param is just here for training `model` compatibility.
@@ -59,6 +84,12 @@ class IAF(nn.Module):
 
     def out_dist(self):
         return self.z_dist
+
+    def has_speaker_embedding(self):
+        return self.embed_speakers is not None
+
+    def local_conditioning_enabled(self):
+        return self.cin_channels > 0
 
 class PWavenet(nn.Module):
     """
@@ -112,7 +143,7 @@ class PWavenet(nn.Module):
                  scalar_input=True,
                  use_speaker_embedding=True,
                  ):
-        super(PWaveNet, self).__init__()
+        super(PWavenet, self).__init__()
         self.scalar_input = scalar_input
         self.out_channels = out_channels
         self.cin_channels = cin_channels
@@ -167,8 +198,6 @@ class PWavenet(nn.Module):
                 self.upsample_conv.append(nn.ReLU(inplace=True))
         else:
             self.upsample_conv = None
-
-        self.receptive_field = receptive_field_size(layers, stacks, kernel_size)
 
     def has_speaker_embedding(self):
         return self.embed_speakers is not None
