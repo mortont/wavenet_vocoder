@@ -335,16 +335,14 @@ class DiscretizedMixturelogisticLoss(nn.Module):
         return ((losses * mask_).sum()) / mask_.sum()
 
 class ProbabilityDensityDistillationLoss(nn.Module):
-    def __init__(self, teacher, c, g):
+    def __init__(self, teacher):
         super(ProbabilityDensityDistillationLoss, self).__init__()
         self.teacher = teacher
-        self.c = c
-        self.g = g
 
         for param in self.teacher.parameters():
             param.requires_grad = False
 
-    def forward(self, input, target, lengths=None, mask=None, max_len=None):
+    def forward(self, input, target, c, g, lengths=None, mask=None, max_len=None):
         if lengths is None and mask is None:
             raise RuntimeError("Should provide either lengths or mask")
 
@@ -355,7 +353,7 @@ class ProbabilityDensityDistillationLoss(nn.Module):
         # (B, T, 1)
         mask_ = mask.expand_as(target)
 
-        y = self.teacher(target, self.c, self.g, False)
+        y = self.teacher(target, c, g, False)
         losses = discretized_mix_logistic_loss(
             input, y, num_classes=hparams.quantize_channels,
             log_scale_min=hparams.log_scale_min, reduce=False)
@@ -553,9 +551,12 @@ def eval_model(global_step, writer, device, model, y, c, g, input_lengths, eval_
 
     # Run the model in fast eval mode
     with torch.no_grad():
-        y_hat = model.incremental_forward(
-            initial_input, c=c, g=g, T=length, softmax=True, quantize=True, tqdm=tqdm,
-            log_scale_min=hparams.log_scale_min)
+        if hparams.builder == 'iaf':
+            y_hat = model.forward(c=c, g=g, lengths=lengths)
+        else:
+            y_hat = model.incremental_forward(
+                initial_input, c=c, g=g, T=length, softmax=True, quantize=True, tqdm=tqdm,
+                log_scale_min=hparams.log_scale_min)
 
     if is_mulaw_quantize(hparams.input_type):
         y_hat = y_hat.max(1)[1].view(-1).long().cpu().data.numpy()
@@ -671,12 +672,18 @@ def __train_step(device, phase, epoch, global_step, global_test_step,
     y_hat = torch.nn.parallel.data_parallel(model, (x, c, g, False))
 
     if is_mulaw_quantize(hparams.input_type):
-        # wee need 4d inputs for spatial cross entropy loss
-        # (B, C, T, 1)
-        y_hat = y_hat.unsqueeze(-1)
-        loss = criterion(y_hat[:, :, :-1, :], y[:, 1:, :], mask=mask)
+        if hparams.builder == 'iaf':
+            raise NotImplementedError('Parallel wavenet with quantized input not supported')
+        else:
+            # wee need 4d inputs for spatial cross entropy loss
+            # (B, C, T, 1)
+            y_hat = y_hat.unsqueeze(-1)
+            loss = criterion(y_hat[:, :, :-1, :], y[:, 1:, :], mask=mask)
     else:
-        loss = criterion(y_hat[:, :, :-1], y[:, 1:, :], mask=mask)
+        if hparams.builder == 'iaf':
+            loss = criterion(y_hat[:, :, :-1], y[:, 1:, :], c, g, mask=mask)
+        else:
+            loss = criterion(y_hat[:, :, :-1], y[:, 1:, :], mask=mask)
 
     if train and step > 0 and step % hparams.checkpoint_interval == 0:
         save_states(step, writer, y_hat, y, input_lengths, checkpoint_dir)
@@ -710,9 +717,17 @@ def __train_step(device, phase, epoch, global_step, global_test_step,
 
 def train_loop(device, model, data_loaders, optimizer, writer, checkpoint_dir=None):
     if is_mulaw_quantize(hparams.input_type):
-        criterion = MaskedCrossEntropyLoss()
+        if hparams.builder == 'iaf':
+            raise NotImplementedError('Parallel wavenet with quantized input not supported')
+        else:
+            criterion = MaskedCrossEntropyLoss()
     else:
-        criterion = DiscretizedMixturelogisticLoss()
+        if hparams.builder == 'iaf':
+            teacher = build_model('wavenet')
+            restore_parts(hparams.teacher_path, teacher)
+            criterion = ProbabilityDensityDistillationLoss(teacher)
+        else:
+            criterion = DiscretizedMixturelogisticLoss()
 
     if hparams.exponential_moving_average:
         ema = ExponentialMovingAverage(hparams.ema_decay)
@@ -796,7 +811,7 @@ def save_checkpoint(device, model, optimizer, step, checkpoint_dir, epoch, ema=N
         print("Saved averaged checkpoint:", checkpoint_path)
 
 
-def build_model():
+def build_model(attr=hparams.builder):
     if is_mulaw_quantize(hparams.input_type):
         if hparams.out_channels != hparams.quantize_channels:
             raise RuntimeError(
@@ -806,7 +821,7 @@ def build_model():
         s += "Notice that upsample conv layers will never be used."
         warn(s)
 
-    model = getattr(builder, hparams.builder)(
+    m_params = dict(
         out_channels=hparams.out_channels,
         layers=hparams.layers,
         stacks=hparams.stacks,
@@ -824,6 +839,11 @@ def build_model():
         freq_axis_kernel_size=hparams.freq_axis_kernel_size,
         scalar_input=is_scalar_input(hparams.input_type),
     )
+
+    if attr == 'iaf':
+        model = getattr(builder, attr)()
+    else:
+        model = getattr(builder, attr)(**m_params)
     return model
 
 
@@ -971,9 +991,10 @@ if __name__ == "__main__":
     # Model
     model = build_model().to(device)
 
-    receptive_field = model.receptive_field
-    print("Receptive field (samples / ms): {} / {}".format(
-        receptive_field, receptive_field / fs * 1000))
+    if hparams.builder != 'iaf':
+        receptive_field = model.receptive_field
+        print("Receptive field (samples / ms): {} / {}".format(
+            receptive_field, receptive_field / fs * 1000))
 
     optimizer = optim.Adam(model.parameters(),
                            lr=hparams.initial_learning_rate, betas=(
