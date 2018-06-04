@@ -343,6 +343,8 @@ class ProbabilityDensityDistillationLoss(nn.Module):
             param.requires_grad = False
 
     def forward(self, input, target, c, g, lengths=None, mask=None, max_len=None):
+        x = input[:, :, :-1]
+        y = target[:, 1:, :]
         if lengths is None and mask is None:
             raise RuntimeError("Should provide either lengths or mask")
 
@@ -351,14 +353,17 @@ class ProbabilityDensityDistillationLoss(nn.Module):
             mask = sequence_mask(lengths, max_len).unsqueeze(-1)
 
         # (B, T, 1)
-        mask_ = mask.expand_as(target)
+        mask_ = mask.expand_as(y)
 
-        y = self.teacher(target, c, g, False)
+        out = self.teacher(input, c, g, False)
+
+        input = input.transpose(1, 2)
         losses = discretized_mix_logistic_loss(
-            input, y, num_classes=hparams.quantize_channels,
+            out, input, num_classes=hparams.quantize_channels,
             log_scale_min=hparams.log_scale_min, reduce=False)
+        losses = losses[:, 1:, :]
 
-        assert losses.size() == target.size()
+        assert losses.size() == y.size()
         return ((losses * mask_).sum()) / mask_.sum()
 
 
@@ -681,7 +686,7 @@ def __train_step(device, phase, epoch, global_step, global_test_step,
             loss = criterion(y_hat[:, :, :-1, :], y[:, 1:, :], mask=mask)
     else:
         if hparams.builder == 'iaf':
-            loss = criterion(y_hat[:, :, :-1], y[:, 1:, :], c, g, mask=mask)
+            loss = criterion(y_hat, y, c, g, mask=mask)
         else:
             loss = criterion(y_hat[:, :, :-1], y[:, 1:, :], mask=mask)
 

@@ -61,17 +61,24 @@ class IAF(nn.Module):
         else:
             raise RuntimeError("Must have either x or lengths")
 
-        loc = torch.zeros(B, T)
-        scale = torch.ones(B, T)
+        # TODO: make these inherit the model's device
+        # https://discuss.pytorch.org/t/why-model-to-device-wouldnt-put-tensors-on-a-custom-layer-to-the-same-device/17964/3
+        loc = torch.nn.Parameter(torch.zeros(B, T)).cuda()
+        scale = torch.nn.Parameter(torch.ones(B, T)).cuda()
 
         u_dist = torch.distributions.normal.Normal(
                 loc=loc,
                 scale=scale)
         # TODO: take multiple samples and average?
         z = u_dist.sample((1,))
+        # Need to change batch size here if multiple samples
+        z = z.squeeze()
+        z = z.unsqueeze(1)
 
         for w in self.wavenet_stack:
-            l, s = w(z, c=c, g=g, softmax=False)
+            o = w(z, c=c, g=g, softmax=False)
+            s = o[:, 0, :].unsqueeze(1)
+            l = o[:, 1, :].unsqueeze(1)
             z = z * s + l
             loc = loc * s + l
             scale = scale * s
