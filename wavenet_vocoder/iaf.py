@@ -56,15 +56,17 @@ class IAF(nn.Module):
         if x is None and lengths is not None:
             B = lengths.size()
             T = max(lengths)
+            device = lengths.device
         elif x is not None:
             B, _, T = x.size()
+            device = x.device
         else:
             raise RuntimeError("Must have either x or lengths")
 
-        # TODO: make these inherit the model's device
-        # https://discuss.pytorch.org/t/why-model-to-device-wouldnt-put-tensors-on-a-custom-layer-to-the-same-device/17964/3
-        loc = torch.nn.Parameter(torch.zeros(B, T)).cuda()
-        scale = torch.nn.Parameter(torch.ones(B, T)).cuda()
+        loc = torch.nn.Parameter(torch.zeros(B, T)).type(torch.FloatTensor).to(device)
+        scale = torch.nn.Parameter(torch.ones(B, T)).type(torch.FloatTensor).to(device)
+
+        print(loc.type())
 
         u_dist = torch.distributions.normal.Normal(
                 loc=loc,
