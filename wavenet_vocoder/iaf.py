@@ -72,7 +72,7 @@ class IAF(nn.Module):
         # TODO: take multiple samples and average?
         z = u_dist.sample((1,))
         # Need to change batch size here if multiple samples
-        z = z.squeeze()
+        z = z.squeeze(0)
         z = z.unsqueeze(1)
 
         for w in self.wavenet_stack:
@@ -231,7 +231,13 @@ class PWavenet(nn.Module):
         Returns:
             Tensor: output, shape B x out_channels x T
         """
-        B, _, T = x.size()
+        try:
+            B, _, T = x.size()
+        except ValueError:
+            # Handle eval case
+            x = x.unsqueeze(0)
+            x = x.transpose(-1, -2)
+            B, _, T = x.size()
 
         if g is not None:
             if self.embed_speakers is not None:
