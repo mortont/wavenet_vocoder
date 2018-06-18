@@ -514,7 +514,8 @@ def eval_model(global_step, writer, device, model, y, c, g, input_lengths, eval_
     if ema is not None:
         print("Using averaged model for evaluation")
         model = clone_as_averaged_model(device, model, ema)
-        model.make_generation_fast_()
+        if hparams.builder != 'iaf':
+            model.make_generation_fast_()
 
     model.eval()
     idx = np.random.randint(0, len(y))
@@ -557,7 +558,7 @@ def eval_model(global_step, writer, device, model, y, c, g, input_lengths, eval_
     # Run the model in fast eval mode
     with torch.no_grad():
         if hparams.builder == 'iaf':
-            y_hat = model.forward(c=c, g=g, lengths=lengths)
+            y_hat = model.forward(c=c, g=g, lengths=input_lengths)
         else:
             y_hat = model.incremental_forward(
                 initial_input, c=c, g=g, T=length, softmax=True, quantize=True, tqdm=tqdm,
