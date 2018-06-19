@@ -358,9 +358,12 @@ class ProbabilityDensityDistillationLoss(nn.Module):
         out = self.teacher(input, c, g, False)
 
         input = input.transpose(1, 2)
-        losses = discretized_mix_logistic_loss(
-            out, input, num_classes=hparams.quantize_channels,
-            log_scale_min=hparams.log_scale_min, reduce=False)
+#        losses = discretized_mix_logistic_loss(
+#            out, input, num_classes=hparams.quantize_channels,
+#            log_scale_min=hparams.log_scale_min, reduce=False)
+        samples = sample_from_discretized_mix_logistic(out, log_scale_min=hparams.log_scale_min)
+        samples = samples.unsqueeze(-1)
+        losses = torch.abs(samples - input)
         losses = losses[:, 1:, :]
 
         assert losses.size() == y.size()
