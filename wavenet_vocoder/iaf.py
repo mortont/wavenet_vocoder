@@ -54,19 +54,16 @@ class IAF(nn.Module):
         # NOTE: softmax param is just here for training `model` compatibility.
 
         if x is None and lengths is not None:
-            B = lengths.size()
-            T = max(lengths)
+            B = lengths.size()[0]
+            T = max(lengths).item()
             device = lengths.device
         elif x is not None:
             B, _, T = x.size()
             device = x.device
         else:
             raise RuntimeError("Must have either x or lengths")
-
         loc = torch.nn.Parameter(torch.zeros(B, T)).type(torch.FloatTensor).to(device)
         scale = torch.nn.Parameter(torch.ones(B, T)).type(torch.FloatTensor).to(device)
-
-        print(loc.type())
 
         u_dist = torch.distributions.normal.Normal(
                 loc=loc,
