@@ -605,6 +605,9 @@ def save_states(global_step, writer, y_hat, y, input_lengths, checkpoint_dir=Non
 
         y_hat = P.inv_mulaw_quantize(y_hat, hparams.quantize_channels)
         y = P.inv_mulaw_quantize(y, hparams.quantize_channels)
+    elif hparams.builder == 'iaf':
+        y_hat = y_hat[idx].view(-1).data.cpu().numpy()
+        y = y[idx].view(-1).data.cpu().numpy()
     else:
         # (B, T)
         y_hat = sample_from_discretized_mix_logistic(
