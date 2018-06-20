@@ -342,7 +342,7 @@ class ProbabilityDensityDistillationLoss(nn.Module):
         for param in self.teacher.parameters():
             param.requires_grad = False
 
-    def forward(self, input, target, c, g, lengths=None, mask=None, max_len=None):
+    def forward(self, input, target, c, g, dist, lengths=None, mask=None, max_len=None):
         x = input[:, :, :-1]
         y = target[:, 1:, :]
         if lengths is None and mask is None:
@@ -358,16 +358,29 @@ class ProbabilityDensityDistillationLoss(nn.Module):
         out = self.teacher(input, c, g, False)
 
         input = input.transpose(1, 2)
-#        losses = discretized_mix_logistic_loss(
-#            out, input, num_classes=hparams.quantize_channels,
-#            log_scale_min=hparams.log_scale_min, reduce=False)
-        samples = sample_from_discretized_mix_logistic(out, log_scale_min=hparams.log_scale_min)
-        samples = samples.unsqueeze(-1)
-        losses = torch.abs(samples - input)
-        losses = losses[:, 1:, :]
+        h_Ps_Pt = discretized_mix_logistic_loss(
+            out, input, num_classes=hparams.quantize_channels,
+            log_scale_min=hparams.log_scale_min, reduce=False)
 
-        assert losses.size() == y.size()
-        return ((losses * mask_).sum()) / mask_.sum()
+        h_Ps_Pt = h_Ps_Pt[:, 1:, :]
+        assert h_Ps_Pt.size() == y.size()
+
+        # (B,)
+        h_Ps = -dist.entropy()
+        h_Ps = h_Ps[:, 1:].unsqueeze(-1)
+
+        # (B, 1)
+        h_Ps = ((h_Ps * mask_).sum(1)) / mask_.sum(1)
+        h_Ps_Pt = ((h_Ps_Pt * mask_).sum(1)) / mask_.sum(1)
+
+        # (B,)
+        h_Ps = h_Ps.squeeze(-1)
+        h_Ps_Pt = h_Ps_Pt.squeeze(-1)
+
+        losses = h_Ps_Pt + h_Ps
+        losses = losses.mean()
+
+        return losses
 
 
 def ensure_divisible(length, divisible_by=256, lower=True):
@@ -693,7 +706,7 @@ def __train_step(device, phase, epoch, global_step, global_test_step,
             loss = criterion(y_hat[:, :, :-1, :], y[:, 1:, :], mask=mask)
     else:
         if hparams.builder == 'iaf':
-            loss = criterion(y_hat, y, c, g, mask=mask)
+            loss = criterion(y_hat, y, c, g, model.out_dist(), mask=mask)
         else:
             loss = criterion(y_hat[:, :, :-1], y[:, 1:, :], mask=mask)
 

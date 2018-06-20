@@ -74,13 +74,20 @@ class IAF(nn.Module):
         z = z.squeeze(0)
         z = z.unsqueeze(1)
 
+        loc = loc.unsqueeze(1)
+        scale = scale.unsqueeze(1)
+
         for w in self.wavenet_stack:
             o = w(z, c=c, g=g, softmax=False)
             s = o[:, 0, :].unsqueeze(1)
             l = o[:, 1, :].unsqueeze(1)
+            s = s.abs()
             z = z * s + l
             loc = loc * s + l
             scale = scale * s
+
+        loc = loc.squeeze(1)
+        scale = scale.squeeze(1)
 
         self.z_dist = torch.distributions.normal.Normal(
                 loc=loc,
