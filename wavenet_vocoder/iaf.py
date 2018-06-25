@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.autograd import Variable as V
 
 from .modules import Embedding
 from .modules import Conv1d1x1, ResidualConv1dGLU, ConvTranspose2d
@@ -62,41 +63,25 @@ class IAF(nn.Module):
             device = x.device
         else:
             raise RuntimeError("Must have either x or lengths")
-        loc = torch.nn.Parameter(torch.zeros(B, T)).type(torch.FloatTensor).to(device)
-        scale = torch.nn.Parameter(torch.ones(B, T)).type(torch.FloatTensor).to(device)
 
-        u_dist = torch.distributions.normal.Normal(
-                loc=loc,
-                scale=scale)
-        # TODO: take multiple samples and average?
-        z = u_dist.sample((1,))
-        # Need to change batch size here if multiple samples
-        z = z.squeeze(0)
-        z = z.unsqueeze(1)
+        u = torch.FloatTensor(B, 1, T).to(device)
+        u.uniform_(1e-5, 1. - 1e-5)
+        z = torch.log(u) - torch.log(1. - u)
+        z = V(z, requires_grad=False)
 
-        loc = loc.unsqueeze(1)
-        scale = scale.unsqueeze(1)
+        self.loc = torch.zeros_like(z)
+        self.scale = torch.zeros_like(z)
 
         for w in self.wavenet_stack:
             o = w(z, c=c, g=g, softmax=False)
             s = o[:, 0, :].unsqueeze(1)
             l = o[:, 1, :].unsqueeze(1)
-            s = s.abs()
-            z = z * s + l
-            loc = loc * s + l
-            scale = scale * s
-
-        loc = loc.squeeze(1)
-        scale = scale.squeeze(1)
-
-        self.z_dist = torch.distributions.normal.Normal(
-                loc=loc,
-                scale=scale)
+            s_exp = torch.exp(s)
+            z = z * s_exp + l
+            self.loc = self.loc * s_exp + l
+            self.scale = self.scale * s
 
         return z
-
-    def out_dist(self):
-        return self.z_dist
 
     def has_speaker_embedding(self):
         return self.embed_speakers is not None

@@ -36,6 +36,7 @@ import lrschedule
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.autograd import Variable as V
 from torch import optim
 import torch.backends.cudnn as cudnn
 from torch.utils import data as data_utils
@@ -342,8 +343,7 @@ class ProbabilityDensityDistillationLoss(nn.Module):
         for param in self.teacher.parameters():
             param.requires_grad = False
 
-    def forward(self, input, target, c, g, dist, lengths=None, mask=None, max_len=None):
-        x = input[:, :, :-1]
+    def forward(self, y_hat, target, c, g, model, lengths=None, mask=None, max_len=None):
         y = target[:, 1:, :]
         if lengths is None and mask is None:
             raise RuntimeError("Should provide either lengths or mask")
@@ -355,29 +355,47 @@ class ProbabilityDensityDistillationLoss(nn.Module):
         # (B, T, 1)
         mask_ = mask.expand_as(y)
 
-        out = self.teacher(input, c, g, False)
+        out = self.teacher(y_hat, c, g, False)
 
-        input = input.transpose(1, 2)
+        mu = model.loc.contiguous()
+        s = model.scale.contiguous()
+
+        # NOTE: hardcoding samples for now
+        N_SAMPLES = 1
+
+        B, _, T = mu.size()
+        u = torch.FloatTensor(B * T, N_SAMPLES).to(y.device) # (B * T, S)
+        u.uniform_(1e-5, 1. - 1e-5)
+        z = torch.log(u) - torch.log(1. - u)
+        z = V(z, requires_grad=False)
+        sample = mu.contiguous().view(-1, 1) + torch.exp(s).contiguous().view(-1, 1) * z # (B * T, S)
+        sample = sample.view(B, T, -1) # (B, T, S)
+        sample = sample.transpose(1, 2) # (B, S, T)
+        sample = sample.contiguous().view(-1, T, 1) # (B * S, T, 1) for batch compatibility
+
         h_Ps_Pt = discretized_mix_logistic_loss(
-            out, input, num_classes=hparams.quantize_channels,
-            log_scale_min=hparams.log_scale_min, reduce=False)
+            out, sample, num_classes=hparams.quantize_channels,
+            log_scale_min=hparams.log_scale_min, reduce=False) # (B * S, T, 1)
+
+        h_Ps_Pt = h_Ps_Pt.contiguous().view(B, N_SAMPLES, T, -1) # (B, S, T, 1)
+        h_Ps_Pt = h_Ps_Pt.mean(1) # (B, T, 1)
 
         h_Ps_Pt = h_Ps_Pt[:, 1:, :]
         assert h_Ps_Pt.size() == y.size()
 
         # (B,)
-        h_Ps = -dist.entropy()
-        h_Ps = h_Ps[:, 1:].unsqueeze(-1)
+        h_Ps = s
+        h_Ps = h_Ps.transpose(1, 2)[:, 1:, :]
 
         # (B, 1)
-        h_Ps = ((h_Ps * mask_).sum(1)) / mask_.sum(1)
+        h_Ps = (((h_Ps + 2) * mask_).sum(1)) / mask_.sum(1)
         h_Ps_Pt = ((h_Ps_Pt * mask_).sum(1)) / mask_.sum(1)
 
         # (B,)
         h_Ps = h_Ps.squeeze(-1)
         h_Ps_Pt = h_Ps_Pt.squeeze(-1)
 
-        losses = h_Ps_Pt + h_Ps
+        losses = h_Ps_Pt - h_Ps
         losses = losses.mean()
 
         return losses
@@ -689,7 +707,7 @@ def __train_step(device, phase, epoch, global_step, global_test_step,
     mask = mask[:, 1:, :]
 
     # Apply model: Run the model in regular eval mode
-    # NOTE: softmax is handled in F.cross_entrypy_loss
+    # NOTE: softmax is handled in F.cross_entropy_loss
     # y_hat: (B x C x T)
 
     # multi gpu support
@@ -700,13 +718,13 @@ def __train_step(device, phase, epoch, global_step, global_test_step,
         if hparams.builder == 'iaf':
             raise NotImplementedError('Parallel wavenet with quantized input not supported')
         else:
-            # wee need 4d inputs for spatial cross entropy loss
+            # we need 4d inputs for spatial cross entropy loss
             # (B, C, T, 1)
             y_hat = y_hat.unsqueeze(-1)
             loss = criterion(y_hat[:, :, :-1, :], y[:, 1:, :], mask=mask)
     else:
         if hparams.builder == 'iaf':
-            loss = criterion(y_hat, y, c, g, model.out_dist(), mask=mask)
+            loss = criterion(y_hat, y, c, g, model, mask=mask)
         else:
             loss = criterion(y_hat[:, :, :-1], y[:, 1:, :], mask=mask)
 
