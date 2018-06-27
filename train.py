@@ -336,14 +336,15 @@ class DiscretizedMixturelogisticLoss(nn.Module):
         return ((losses * mask_).sum()) / mask_.sum()
 
 class ProbabilityDensityDistillationLoss(nn.Module):
-    def __init__(self, teacher):
+    def __init__(self, teacher, writer=None):
         super(ProbabilityDensityDistillationLoss, self).__init__()
         self.teacher = teacher
+        self.writer = writer
 
         for param in self.teacher.parameters():
             param.requires_grad = False
 
-    def forward(self, target, c, g, model, lengths=None, mask=None, max_len=None):
+    def forward(self, target, c, g, model, lengths=None, mask=None, max_len=None, step=None):
         y = target[:, 1:, :]
         if lengths is None and mask is None:
             raise RuntimeError("Should provide either lengths or mask")
@@ -373,7 +374,7 @@ class ProbabilityDensityDistillationLoss(nn.Module):
 
         # Calculate cross entropy between student and teacher
         # NOTE: hardcoding samples for now
-        N_SAMPLES = 1
+        N_SAMPLES = 15
         u = torch.FloatTensor(B * T, N_SAMPLES).to(target.device) # (B * T, S)
         u.uniform_(1e-5, 1. - 1e-5)
         z = torch.log(u) - torch.log(1. - u)
@@ -381,12 +382,15 @@ class ProbabilityDensityDistillationLoss(nn.Module):
 
         # Broadcast final location and scale to logistic sample
         sample = loc.view(-1, 1) + torch.exp(log_scale).view(-1, 1) * z # (B * T, S, 1)
+        sample = torch.clamp(sample, -1., 1.)
+
+        writer.add_histogram('sample', sample, step)
 
         sample = sample.view(B, T, -1) # (B, T, S)
         sample = sample.transpose(1, 2) # (B, S, T)
         sample = sample.contiguous().view(-1, T, 1) # (B * S, T, 1) for batch compatibility
 
-        print('sample', sample.min().item(), sample.max().item(), sample.mean().item())
+        p_t = p_t.repeat(N_SAMPLES, 1, 1) # (B * S, C, T)
 
         h_Ps_Pt = discretized_mix_logistic_loss(
             p_t, sample, num_classes=hparams.quantize_channels,
@@ -409,9 +413,6 @@ class ProbabilityDensityDistillationLoss(nn.Module):
         # (B,)
         h_Ps = h_Ps.squeeze(-1)
         h_Ps_Pt = h_Ps_Pt.squeeze(-1)
-
-        print('h_Ps', h_Ps.mean().item())
-        print('h_Ps_Pt', h_Ps_Pt.mean().item())
 
         losses = h_Ps_Pt - h_Ps
         losses = losses.mean()
@@ -747,7 +748,7 @@ def __train_step(device, phase, epoch, global_step, global_test_step,
         if hparams.builder == 'iaf':
             # multi gpu support
             # you must make sure that batch size % num gpu == 0
-            loss = criterion(y, c, g, torch.nn.parallel.DataParallel(model), mask=mask)
+            loss = criterion(y, c, g, torch.nn.parallel.DataParallel(model), mask=mask, step=step)
         else:
             # multi gpu support
             # you must make sure that batch size % num gpu == 0
@@ -795,7 +796,7 @@ def train_loop(device, model, data_loaders, optimizer, writer, checkpoint_dir=No
             device = torch.device("cuda" if use_cuda else "cpu")
             teacher = build_model('wavenet').to(device)
             restore_parts(hparams.teacher_path, teacher)
-            criterion = ProbabilityDensityDistillationLoss(teacher)
+            criterion = ProbabilityDensityDistillationLoss(teacher, writer=writer)
         else:
             criterion = DiscretizedMixturelogisticLoss()
 
