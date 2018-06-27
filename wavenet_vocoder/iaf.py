@@ -6,7 +6,6 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.autograd import Variable as V
 
 from .modules import Embedding
 from .modules import Conv1d1x1, ResidualConv1dGLU, ConvTranspose2d
@@ -51,37 +50,28 @@ class IAF(nn.Module):
                         use_speaker_embedding=use_speaker_embedding
                         ))
 
-    def forward(self, x=None, c=None, g=None, softmax=False, lengths=None):
+    def forward(self, z=None, c=None, g=None, softmax=False, lengths=None):
         # NOTE: softmax param is just here for training `model` compatibility.
-
-        if x is None and lengths is not None:
-            B = lengths.size()[0]
-            T = max(lengths).item()
-            device = lengths.device
-        elif x is not None:
-            B, _, T = x.size()
-            device = x.device
-        else:
-            raise RuntimeError("Must have either x or lengths")
-
-        u = torch.FloatTensor(B, 1, T).to(device)
-        u.uniform_(1e-5, 1. - 1e-5)
-        z = torch.log(u) - torch.log(1. - u)
-        z = V(z, requires_grad=False)
+        B, _, T = z.size()
+        device = z.device
 
         self.loc = torch.zeros_like(z)
-        self.scale = torch.zeros_like(z)
+        self.log_scale = torch.zeros_like(z)
+        x = z
 
         for w in self.wavenet_stack:
-            o = w(z, c=c, g=g, softmax=False)
+            o = w(x, c=c, g=g, softmax=False)
             s = o[:, 0, :].unsqueeze(1)
             l = o[:, 1, :].unsqueeze(1)
-            s_exp = torch.exp(s)
-            z = z * s_exp + l
-            self.loc = self.loc * s_exp + l
-            self.scale = self.scale * s
 
-        return z
+            s_exp = torch.exp(s)
+            x = x * s_exp + l
+            self.loc = self.loc * s_exp + l
+            self.log_scale = self.log_scale + s
+
+        print()
+        print('x', x.min().item(), x.max().item(), x.mean().item())
+        return x
 
     def has_speaker_embedding(self):
         return self.embed_speakers is not None

@@ -343,7 +343,7 @@ class ProbabilityDensityDistillationLoss(nn.Module):
         for param in self.teacher.parameters():
             param.requires_grad = False
 
-    def forward(self, y_hat, target, c, g, model, lengths=None, mask=None, max_len=None):
+    def forward(self, target, c, g, model, lengths=None, mask=None, max_len=None):
         y = target[:, 1:, :]
         if lengths is None and mask is None:
             raise RuntimeError("Should provide either lengths or mask")
@@ -355,26 +355,41 @@ class ProbabilityDensityDistillationLoss(nn.Module):
         # (B, T, 1)
         mask_ = mask.expand_as(y)
 
-        out = self.teacher(y_hat, c, g, False)
+        B, T, _ = target.size()
 
-        mu = model.loc.contiguous()
-        s = model.scale.contiguous()
-
-        # NOTE: hardcoding samples for now
-        N_SAMPLES = 1
-
-        B, _, T = mu.size()
-        u = torch.FloatTensor(B * T, N_SAMPLES).to(y.device) # (B * T, S)
+        # Create logistic samples
+        u = torch.FloatTensor(B, 1, T).to(target.device) # (B * T, S)
         u.uniform_(1e-5, 1. - 1e-5)
         z = torch.log(u) - torch.log(1. - u)
         z = V(z, requires_grad=False)
-        sample = mu.contiguous().view(-1, 1) + torch.exp(s).contiguous().view(-1, 1) * z # (B * T, S)
+
+        # Generate IAF output from logistic sample
+        x_s = model(z, c, g)
+        loc = model.module.loc.contiguous()
+        log_scale = model.module.log_scale.contiguous()
+
+        # Evaluate generated IAF samples under the teacher
+        p_t = self.teacher(x_s, c, g, False)
+
+        # Calculate cross entropy between student and teacher
+        # NOTE: hardcoding samples for now
+        N_SAMPLES = 1
+        u = torch.FloatTensor(B * T, N_SAMPLES).to(target.device) # (B * T, S)
+        u.uniform_(1e-5, 1. - 1e-5)
+        z = torch.log(u) - torch.log(1. - u)
+        z = V(z, requires_grad=False)
+
+        # Broadcast final location and scale to logistic sample
+        sample = loc.view(-1, 1) + torch.exp(log_scale).view(-1, 1) * z # (B * T, S, 1)
+
         sample = sample.view(B, T, -1) # (B, T, S)
         sample = sample.transpose(1, 2) # (B, S, T)
         sample = sample.contiguous().view(-1, T, 1) # (B * S, T, 1) for batch compatibility
 
+        print('sample', sample.min().item(), sample.max().item(), sample.mean().item())
+
         h_Ps_Pt = discretized_mix_logistic_loss(
-            out, sample, num_classes=hparams.quantize_channels,
+            p_t, sample, num_classes=hparams.quantize_channels,
             log_scale_min=hparams.log_scale_min, reduce=False) # (B * S, T, 1)
 
         h_Ps_Pt = h_Ps_Pt.contiguous().view(B, N_SAMPLES, T, -1) # (B, S, T, 1)
@@ -384,16 +399,19 @@ class ProbabilityDensityDistillationLoss(nn.Module):
         assert h_Ps_Pt.size() == y.size()
 
         # (B,)
-        h_Ps = s
+        h_Ps = log_scale
         h_Ps = h_Ps.transpose(1, 2)[:, 1:, :]
 
         # (B, 1)
-        h_Ps = (((h_Ps + 2) * mask_).sum(1)) / mask_.sum(1)
+        h_Ps = (((h_Ps + 2 * torch.ones_like(h_Ps)) * mask_).sum(1)) / mask_.sum(1)
         h_Ps_Pt = ((h_Ps_Pt * mask_).sum(1)) / mask_.sum(1)
 
         # (B,)
         h_Ps = h_Ps.squeeze(-1)
         h_Ps_Pt = h_Ps_Pt.squeeze(-1)
+
+        print('h_Ps', h_Ps.mean().item())
+        print('h_Ps_Pt', h_Ps_Pt.mean().item())
 
         losses = h_Ps_Pt - h_Ps
         losses = losses.mean()
@@ -592,7 +610,11 @@ def eval_model(global_step, writer, device, model, y, c, g, input_lengths, eval_
     # Run the model in fast eval mode
     with torch.no_grad():
         if hparams.builder == 'iaf':
-            y_hat = model.forward(c=c, g=g, lengths=input_lengths)
+            u = torch.FloatTensor(1, 1, length).to(c.device) # (B * T, S)
+            u.uniform_(1e-5, 1. - 1e-5)
+            z = torch.log(u) - torch.log(1. - u)
+            z = V(z, requires_grad=False)
+            y_hat = model.forward(z=z, c=c, g=g, lengths=input_lengths)
         else:
             y_hat = model.incremental_forward(
                 initial_input, c=c, g=g, T=length, softmax=True, quantize=True, tqdm=tqdm,
@@ -710,22 +732,26 @@ def __train_step(device, phase, epoch, global_step, global_test_step,
     # NOTE: softmax is handled in F.cross_entropy_loss
     # y_hat: (B x C x T)
 
-    # multi gpu support
-    # you must make sure that batch size % num gpu == 0
-    y_hat = torch.nn.parallel.data_parallel(model, (x, c, g, False))
-
     if is_mulaw_quantize(hparams.input_type):
         if hparams.builder == 'iaf':
             raise NotImplementedError('Parallel wavenet with quantized input not supported')
         else:
+            # multi gpu support
+            # you must make sure that batch size % num gpu == 0
+            y_hat = torch.nn.parallel.data_parallel(model, (x, c, g, False))
             # we need 4d inputs for spatial cross entropy loss
             # (B, C, T, 1)
             y_hat = y_hat.unsqueeze(-1)
             loss = criterion(y_hat[:, :, :-1, :], y[:, 1:, :], mask=mask)
     else:
         if hparams.builder == 'iaf':
-            loss = criterion(y_hat, y, c, g, model, mask=mask)
+            # multi gpu support
+            # you must make sure that batch size % num gpu == 0
+            loss = criterion(y, c, g, torch.nn.parallel.DataParallel(model), mask=mask)
         else:
+            # multi gpu support
+            # you must make sure that batch size % num gpu == 0
+            y_hat = torch.nn.parallel.data_parallel(model, (x, c, g, False))
             loss = criterion(y_hat[:, :, :-1], y[:, 1:, :], mask=mask)
 
     if train and step > 0 and step % hparams.checkpoint_interval == 0:
