@@ -358,30 +358,29 @@ class ProbabilityDensityDistillationLoss(nn.Module):
 
         B, T, _ = target.size()
 
-        # Create logistic samples
+        # Create logistic samples (inverse transform sampling)
         u = torch.FloatTensor(B, 1, T).to(target.device) # (B * T, S)
         u.uniform_(1e-5, 1. - 1e-5)
         z = torch.log(u) - torch.log(1. - u)
         z = V(z, requires_grad=False)
 
         # Generate IAF output from logistic sample
-        x_s = model(z, c, g)
-        loc = model.module.loc.contiguous()
-        log_scale = model.module.log_scale.contiguous()
+        x_s = model(z, c, g) # (B, 1, T)
+        loc = model.module.loc.contiguous() # (B, 1, T)
+        log_scale = model.module.log_scale.contiguous() # (B, 1, T)
 
         # Evaluate generated IAF samples under the teacher
         p_t = self.teacher(x_s, c, g, False)
 
         # Calculate cross entropy between student and teacher
-        # NOTE: hardcoding samples for now
-        N_SAMPLES = 15
+        N_SAMPLES = hparams.num_samples if not None else 1
         u = torch.FloatTensor(B * T, N_SAMPLES).to(target.device) # (B * T, S)
         u.uniform_(1e-5, 1. - 1e-5)
         z = torch.log(u) - torch.log(1. - u)
         z = V(z, requires_grad=False)
 
         # Broadcast final location and scale to logistic sample
-        sample = loc.view(-1, 1) + torch.exp(log_scale).view(-1, 1) * z # (B * T, S, 1)
+        sample = loc.view(-1, 1) + torch.exp(log_scale).view(-1, 1) * z # (B * T, S)
         sample = torch.clamp(sample, -1., 1.)
 
         writer.add_histogram('sample', sample, step)

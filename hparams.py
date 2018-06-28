@@ -90,6 +90,7 @@ hparams = tf.contrib.training.HParams(
     random_state=1234,
 
     # Loss
+    num_samples = 10,
 
     # Training:
     batch_size=2,
