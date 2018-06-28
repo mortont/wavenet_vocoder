@@ -373,8 +373,12 @@ class ProbabilityDensityDistillationLoss(nn.Module):
         p_t = self.teacher(x_s, c, g, False)
 
         # Calculate cross entropy between student and teacher
-        N_SAMPLES = hparams.num_samples if not None else 1
-        u = torch.FloatTensor(B * T, N_SAMPLES).to(target.device) # (B * T, S)
+        if hparams.num_samples is not None:
+            n_samples = hparams.num_samples
+        else:
+            n_samples = 1
+
+        u = torch.FloatTensor(B * T, n_samples).to(target.device) # (B * T, S)
         u.uniform_(1e-5, 1. - 1e-5)
         z = torch.log(u) - torch.log(1. - u)
         z = V(z, requires_grad=False)
@@ -389,13 +393,13 @@ class ProbabilityDensityDistillationLoss(nn.Module):
         sample = sample.transpose(1, 2) # (B, S, T)
         sample = sample.contiguous().view(-1, T, 1) # (B * S, T, 1) for batch compatibility
 
-        p_t = p_t.repeat(N_SAMPLES, 1, 1) # (B * S, C, T)
+        p_t = p_t.repeat(n_samples, 1, 1) # (B * S, C, T)
 
         h_Ps_Pt = discretized_mix_logistic_loss(
             p_t, sample, num_classes=hparams.quantize_channels,
             log_scale_min=hparams.log_scale_min, reduce=False) # (B * S, T, 1)
 
-        h_Ps_Pt = h_Ps_Pt.contiguous().view(B, N_SAMPLES, T, -1) # (B, S, T, 1)
+        h_Ps_Pt = h_Ps_Pt.contiguous().view(B, n_samples, T, -1) # (B, S, T, 1)
         h_Ps_Pt = h_Ps_Pt.mean(1) # (B, T, 1)
 
         h_Ps_Pt = h_Ps_Pt[:, 1:, :]
