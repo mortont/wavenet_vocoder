@@ -344,6 +344,28 @@ class ProbabilityDensityDistillationLoss(nn.Module):
         for param in self.teacher.parameters():
             param.requires_grad = False
 
+    def power_loss(self, x, target, factor=3.0,
+            frame_length=200,
+            frame_step=10,
+            fft_size=512):
+        x = torch.squeeze(x, 1)
+        target = torch.squeeze(target, 2)
+
+        x_stft = torch.stft(x, frame_length, frame_step, fft_size, onesided=True)
+        target_stft = torch.stft(target, frame_length, frame_step, fft_size, onesided=True)
+
+        def fft_amp(fft):
+            real = fft[:, :, :, 0]
+            comp = fft[:, :, :, 1]
+            return torch.sqrt((real.pow(2) + comp.pow(2)))
+
+        x_stft = fft_amp(x_stft)
+        target_stft = fft_amp(target_stft)
+
+        diff = torch.abs(target_stft - x_stft)
+        diff = factor * diff.mean(-1).mean(-1)
+        return diff
+
     def forward(self, target, c, g, model, lengths=None, mask=None, max_len=None, step=None):
         y = target[:, 1:, :]
         if lengths is None and mask is None:
@@ -417,10 +439,12 @@ class ProbabilityDensityDistillationLoss(nn.Module):
         h_Ps = h_Ps.squeeze(-1)
         h_Ps_Pt = h_Ps_Pt.squeeze(-1)
 
-        losses = h_Ps_Pt - h_Ps
-        losses = losses.mean()
+        kl_loss = h_Ps_Pt - h_Ps
 
-        return losses
+        pwr_loss = self.power_loss(x_s, target)
+        losses = kl_loss + pwr_loss
+
+        return losses.mean()
 
 
 def ensure_divisible(length, divisible_by=256, lower=True):

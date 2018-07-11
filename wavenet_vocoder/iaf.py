@@ -56,7 +56,7 @@ class IAF(nn.Module):
         device = z.device
 
         self.loc = torch.zeros_like(z)
-        self.log_scale = torch.log(torch.ones_like(z))
+        self.log_scale = torch.zeros_like(z)
         x = z
 
         for w in self.wavenet_stack:
@@ -69,7 +69,7 @@ class IAF(nn.Module):
             self.loc = self.loc * s_exp + l
             self.log_scale = self.log_scale + s
 
-        return x
+        return x * torch.exp(self.log_scale) + self.loc
 
     def has_speaker_embedding(self):
         return self.embed_speakers is not None
