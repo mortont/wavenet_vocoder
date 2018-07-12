@@ -386,10 +386,13 @@ class ProbabilityDensityDistillationLoss(nn.Module):
         z = torch.log(u) - torch.log(1. - u)
         z = V(z, requires_grad=False)
 
+        writer.add_histogram('target', target, step, bins=np.arange(-1., 1., .05))
+
         # Generate IAF output from logistic sample
         x_s = model(z, c, g) # (B, 1, T)
         loc = model.module.loc.contiguous() # (B, 1, T)
         log_scale = model.module.log_scale.contiguous() # (B, 1, T)
+        writer.add_histogram('x_s', torch.clamp(x_s, -1., 1.), step, bins=np.arange(-1., 1., .05))
 
         # Evaluate generated IAF samples under the teacher
         p_t = self.teacher(x_s, c, g, False)
@@ -409,7 +412,7 @@ class ProbabilityDensityDistillationLoss(nn.Module):
         sample = loc.view(-1, 1) + torch.exp(log_scale).view(-1, 1) * z # (B * T, S)
         sample = torch.clamp(sample, -1., 1.)
 
-        writer.add_histogram('sample', sample, step)
+        writer.add_histogram('sample', sample, step, bins=np.arange(-1., 1., .05))
 
         sample = sample.view(B, T, -1) # (B, T, S)
         sample = sample.transpose(1, 2) # (B, S, T)
