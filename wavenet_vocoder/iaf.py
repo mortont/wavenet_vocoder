@@ -69,7 +69,7 @@ class IAF(nn.Module):
             self.loc = self.loc * s_exp + l
             self.log_scale = self.log_scale + s
 
-        return x * torch.exp(self.log_scale) + self.loc
+        return z * torch.exp(self.log_scale) + self.loc
 
     def has_speaker_embedding(self):
         return self.embed_speakers is not None
