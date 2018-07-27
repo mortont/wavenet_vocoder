@@ -107,11 +107,13 @@ class WaveNet(nn.Module):
                  freq_axis_kernel_size=3,
                  scalar_input=False,
                  use_speaker_embedding=True,
+                 clarinet=False
                  ):
         super(WaveNet, self).__init__()
         self.scalar_input = scalar_input
         self.out_channels = out_channels
         self.cin_channels = cin_channels
+        self.clarinet = clarinet
         assert layers % stacks == 0
         layers_per_stack = layers // stacks
         if scalar_input:
@@ -342,8 +344,17 @@ class WaveNet(nn.Module):
 
             # Generate next input by sampling
             if self.scalar_input:
-                x = sample_from_discretized_mix_logistic(
-                    x.view(B, -1, 1), log_scale_min=log_scale_min)
+                if self.clarinet:
+                    x = x.view(B, -1, 1)
+                    s = x[:, 0, :].unsqueeze(1)
+                    l = x[:, 1, :].unsqueeze(1)
+                    s = torch.clamp(s, -7.0, 7.0)
+                    s_exp = torch.exp(s)
+                    dist = torch.distributions.normal.Normal(l, s_exp)
+                    x = dist.sample()
+                else:
+                    x = sample_from_discretized_mix_logistic(
+                        x.view(B, -1, 1), log_scale_min=log_scale_min)
             else:
                 x = F.softmax(x.view(B, -1), dim=1) if softmax else x.view(B, -1)
                 if quantize:

@@ -335,6 +335,41 @@ class DiscretizedMixturelogisticLoss(nn.Module):
         assert losses.size() == target.size()
         return ((losses * mask_).sum()) / mask_.sum()
 
+class SingleGaussianLoss(nn.Module):
+    def __init__(self, writer=None):
+        super(SingleGaussianLoss, self).__init__()
+        self.writer = writer
+
+    def forward(self, input, target, step, lengths=None, mask=None, max_len=None):
+        if lengths is None and mask is None:
+            raise RuntimeError("Should provide either lengths or mask")
+
+        # (B, T, 1)
+        if mask is None:
+            mask = sequence_mask(lengths, max_len).unsqueeze(-1)
+
+        # (B, T, 1)
+        mask_ = mask.expand_as(target)
+
+        s = input[:, 0, :].unsqueeze(1).transpose(1, 2)
+        l = input[:, 1, :].unsqueeze(1).transpose(1, 2)
+
+        s = torch.clamp(s, -7.0, 7.0)
+        writer.add_histogram('log_sigma', s, step, bins=np.arange(-7., 7., .2))
+        writer.add_histogram('mu', l, step, bins=np.arange(-1.2, 1.2, .05))
+        writer.add_histogram('target', target, step, bins=np.arange(-1.2, 1.2, .05))
+
+        s_exp = torch.exp(s)
+        dist = torch.distributions.normal.Normal(l, s_exp)
+
+        sample = dist.sample()
+        writer.add_scalar('train_error', torch.abs(torch.mean(target - sample)), step)
+
+        losses = -dist.log_prob(target)
+
+        assert losses.size() == target.size()
+        return ((losses * mask_).sum()) / mask_.sum()
+
 class ProbabilityDensityDistillationLoss(nn.Module):
     def __init__(self, teacher, writer=None):
         super(ProbabilityDensityDistillationLoss, self).__init__()
@@ -695,6 +730,16 @@ def save_states(global_step, writer, y_hat, y, input_lengths, checkpoint_dir=Non
     elif hparams.builder == 'iaf':
         y_hat = y_hat[idx].view(-1).data.cpu().numpy()
         y = y[idx].view(-1).data.cpu().numpy()
+    elif hparams.builder == 'clarinet':
+        s = y_hat[:, 0, :].unsqueeze(1).transpose(1, 2)
+        l = y_hat[:, 1, :].unsqueeze(1).transpose(1, 2)
+        s = torch.clamp(s, -7.0, 7.0)
+        s_exp = torch.exp(s)
+        dist = torch.distributions.normal.Normal(l, s_exp)
+
+        y_hat = dist.sample()
+        y_hat = y_hat[idx].view(-1).data.cpu().numpy()
+        y = y[idx].view(-1).data.cpu().numpy()
     else:
         # (B, T)
         y_hat = sample_from_discretized_mix_logistic(
@@ -766,6 +811,8 @@ def __train_step(device, phase, epoch, global_step, global_test_step,
     if is_mulaw_quantize(hparams.input_type):
         if hparams.builder == 'iaf':
             raise NotImplementedError('Parallel wavenet with quantized input not supported')
+        elif hparams.builder == 'clarinet':
+            raise NotImplementedError('ClariNet with quantized input not supported')
         else:
             # multi gpu support
             # you must make sure that batch size % num gpu == 0
@@ -778,7 +825,12 @@ def __train_step(device, phase, epoch, global_step, global_test_step,
         if hparams.builder == 'iaf':
             # multi gpu support
             # you must make sure that batch size % num gpu == 0
-            loss = criterion(y, c, g, torch.nn.parallel.DataParallel(model), mask=mask, step=step)
+            loss = criterion(y, c, g, torch.nn.parallel.DataParallel(model), mask=mask, step=global_step)
+        elif hparams.builder == 'clarinet':
+            # multi gpu support
+            # you must make sure that batch size % num gpu == 0
+            y_hat = torch.nn.parallel.data_parallel(model, (x, c, g, False))
+            loss = criterion(y_hat[:, :, :-1], y[:, 1:, :], step=global_step, mask=mask)
         else:
             # multi gpu support
             # you must make sure that batch size % num gpu == 0
@@ -819,6 +871,8 @@ def train_loop(device, model, data_loaders, optimizer, writer, checkpoint_dir=No
     if is_mulaw_quantize(hparams.input_type):
         if hparams.builder == 'iaf':
             raise NotImplementedError('Parallel wavenet with quantized input not supported')
+        elif hparams.builder == 'clarinet':
+            raise NotImplementedError('ClariNet with quantized input not supported')
         else:
             criterion = MaskedCrossEntropyLoss()
     else:
@@ -827,6 +881,8 @@ def train_loop(device, model, data_loaders, optimizer, writer, checkpoint_dir=No
             teacher = build_model('wavenet').to(device)
             restore_parts(hparams.teacher_path, teacher)
             criterion = ProbabilityDensityDistillationLoss(teacher, writer=writer)
+        elif hparams.builder == 'clarinet':
+            criterion = SingleGaussianLoss(writer=writer)
         else:
             criterion = DiscretizedMixturelogisticLoss()
 
@@ -1092,10 +1148,10 @@ if __name__ == "__main__":
     # Model
     model = build_model(hparams.builder).to(device)
 
-    if hparams.builder != 'iaf':
-        receptive_field = model.receptive_field
-        print("Receptive field (samples / ms): {} / {}".format(
-            receptive_field, receptive_field / fs * 1000))
+#    if hparams.builder != 'iaf':
+#        receptive_field = model.receptive_field
+#        print("Receptive field (samples / ms): {} / {}".format(
+#            receptive_field, receptive_field / fs * 1000))
 
     optimizer = optim.Adam(model.parameters(),
                            lr=hparams.initial_learning_rate, betas=(
