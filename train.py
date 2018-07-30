@@ -1259,11 +1259,6 @@ if __name__ == "__main__":
     # Model
     model = build_model(hparams.builder).to(device)
 
-#    if hparams.builder != 'iaf':
-#        receptive_field = model.receptive_field
-#        print("Receptive field (samples / ms): {} / {}".format(
-#            receptive_field, receptive_field / fs * 1000))
-
     optimizer = optim.Adam(model.parameters(),
                            lr=hparams.initial_learning_rate, betas=(
         hparams.adam_beta1, hparams.adam_beta2),
