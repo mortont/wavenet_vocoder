@@ -6,3 +6,5 @@ from .version import __version__
 from .wavenet import receptive_field_size, WaveNet
 
 from .iaf import IAF
+
+from .clarinet import IAF

@@ -40,6 +40,26 @@ def wavenet(out_channels=256,
 
     return model
 
+def iaf(cin_channels=80,
+            gin_channels=-1,
+            n_speakers=None,
+            upsample_conditional_features=True,
+            upsample_scales=[4, 4, 4, 4],
+            freq_axis_kernel_size=3,
+            use_speaker_embedding=True,
+            ):
+    from wavenet_vocoder import IAF
+
+    model = IAF(cin_channels=cin_channels, gin_channels=gin_channels,
+                    n_speakers=n_speakers,
+                    upsample_conditional_features=upsample_conditional_features,
+                    upsample_scales=upsample_scales,
+                    freq_axis_kernel_size=freq_axis_kernel_size,
+                    use_speaker_embedding=use_speaker_embedding,
+                    )
+
+    return model
+
 def clarinet(out_channels=2,
             layers=20,
             stacks=2,
@@ -78,7 +98,7 @@ def clarinet(out_channels=2,
 
     return model
 
-def iaf(cin_channels=80,
+def clarinet_iaf(cin_channels=80,
             gin_channels=-1,
             n_speakers=None,
             upsample_conditional_features=True,
@@ -86,7 +106,7 @@ def iaf(cin_channels=80,
             freq_axis_kernel_size=3,
             use_speaker_embedding=True,
             ):
-    from wavenet_vocoder import IAF
+    from .clarinet import IAF
 
     model = IAF(cin_channels=cin_channels, gin_channels=gin_channels,
                     n_speakers=n_speakers,

@@ -484,6 +484,99 @@ class ProbabilityDensityDistillationLoss(nn.Module):
 
         return losses.mean()
 
+class GaussianDistillationLoss(nn.Module):
+    def __init__(self, teacher, writer=None):
+        super(GaussianDistillationLoss, self).__init__()
+        self.teacher = teacher
+        self.writer = writer
+
+        for param in self.teacher.parameters():
+            param.requires_grad = False
+
+    def power_loss(self, x, target, factor=3.0,
+            frame_length=200,
+            frame_step=10,
+            fft_size=512):
+        x = torch.squeeze(x, 1)
+        target = torch.squeeze(target, 2)
+
+        x_stft = torch.stft(x, frame_length, frame_step, fft_size, onesided=True)
+        target_stft = torch.stft(target, frame_length, frame_step, fft_size, onesided=True)
+
+        def fft_amp(fft):
+            real = fft[:, :, :, 0]
+            comp = fft[:, :, :, 1]
+            return torch.sqrt((real.pow(2) + comp.pow(2)))
+
+        x_stft = fft_amp(x_stft)
+        target_stft = fft_amp(target_stft)
+
+        diff = torch.abs(target_stft - x_stft)
+        diff = factor * diff.mean(-1).mean(-1)
+        return diff
+
+    def forward(self, target, c, g, model, lengths=None, mask=None, max_len=None, step=None):
+        y = target[:, 1:, :]
+        if lengths is None and mask is None:
+            raise RuntimeError("Should provide either lengths or mask")
+
+        # (B, T, 1)
+        if mask is None:
+            mask = sequence_mask(lengths, max_len).unsqueeze(-1)
+
+        # (B, T, 1)
+        mask_ = mask.expand_as(y)
+
+        B, T, _ = target.size()
+
+        # Create initial sample
+        dist = torch.distributions.normal.Normal(
+                torch.zeros(B, T), torch.ones(B, T))
+        z = dist.sample()
+        z = z.unsqueeze(1)
+
+        # Generate IAF output from gaussian sample
+        s_x = model(z, c, g) # (B, 1, T)
+        s_log_scale = model.module.log_scale.contiguous() # (B, 1, T)
+        s_loc = model.module.loc.contiguous() # (B, 1, T)
+
+        s_log_scale = torch.clamp(s_log_scale, -7.0, 7.0)
+
+        s_scale = torch.exp(s_log_scale)
+        s_dist = torch.distributions.normal.Normal(s_loc, s_scale)
+
+        # Evaluate generated IAF samples under the teacher
+        t_out = self.teacher(s_x, c, g, False)
+
+        t_log_scale = t_out[:, 0, :].unsqueeze(1) # (B, 1, T)
+        t_loc = t_out[:, 1, :].unsqueeze(1) # (B, 1, T)
+
+        t_log_scale = torch.clamp(t_log_scale, -7.0, 7.0)
+
+        t_scale = torch.exp(t_log_scale)
+        t_dist = torch.distributions.normal.Normal(t_loc, t_scale)
+
+        # Calculate the regularized reverse KL divergence between
+        # the student and teacher. See https://arxiv.org/pdf/1807.07281.pdf
+        kl = (t_loc - s_loc) ** 2
+        kl = kl + s_scale ** 2 - t_scale ** 2
+        kl = kl / (2 * t_scale ** 2)
+        kl = kl + torch.log(t_scale / s_scale)
+
+        reg = 1.
+        kl = reg * torch.abs(t_log_scale - s_log_scale) ** 2 + kl
+
+        kl = kl.transpose(1, 2) # (B, T, 1)
+
+        kl = kl[:, 1:, :]
+
+        writer.add_histogram('log_σ_teacher', t_log_scale, step, bins=np.arange(-7., 1., .2))
+        writer.add_histogram('log_σ_student', s_log_scale, step, bins=np.arange(-7., 1., .2))
+
+        assert kl.size() == y.size()
+
+        return ((kl * mask_).sum()) / mask_.sum()
+
 
 def ensure_divisible(length, divisible_by=256, lower=True):
     if length % divisible_by == 0:
@@ -632,7 +725,7 @@ def eval_model(global_step, writer, device, model, y, c, g, input_lengths, eval_
     if ema is not None:
         print("Using averaged model for evaluation")
         model = clone_as_averaged_model(device, model, ema)
-        if hparams.builder != 'iaf':
+        if 'iaf' not in hparams.builder:
             model.make_generation_fast_()
 
     model.eval()
@@ -681,6 +774,11 @@ def eval_model(global_step, writer, device, model, y, c, g, input_lengths, eval_
             z = torch.log(u) - torch.log(1. - u)
             z = V(z, requires_grad=False)
             y_hat = model.forward(z=z, c=c, g=g, lengths=input_lengths)
+        elif hparams.builder == 'clarinet_iaf':
+            dist = torch.distributions.normal.Normal(
+                    torch.zeros(1, length), torch.ones(1, length))
+            z = dist.sample().unsqueeze(1).to(c.device)
+            y_hat = model.forward(z=z, c=c, g=g)
         else:
             y_hat = model.incremental_forward(
                 initial_input, c=c, g=g, T=length, softmax=True, quantize=True, tqdm=tqdm,
@@ -727,7 +825,7 @@ def save_states(global_step, writer, y_hat, y, input_lengths, checkpoint_dir=Non
 
         y_hat = P.inv_mulaw_quantize(y_hat, hparams.quantize_channels)
         y = P.inv_mulaw_quantize(y, hparams.quantize_channels)
-    elif hparams.builder == 'iaf':
+    elif 'iaf' in hparams.builder:
         y_hat = y_hat[idx].view(-1).data.cpu().numpy()
         y = y[idx].view(-1).data.cpu().numpy()
     elif hparams.builder == 'clarinet':
@@ -831,6 +929,9 @@ def __train_step(device, phase, epoch, global_step, global_test_step,
             # you must make sure that batch size % num gpu == 0
             y_hat = torch.nn.parallel.data_parallel(model, (x, c, g, False))
             loss = criterion(y_hat[:, :, :-1], y[:, 1:, :], step=global_step, mask=mask)
+        elif hparams.builder == 'clarinet_iaf':
+            loss = criterion(y, c, g, torch.nn.parallel.DataParallel(model),
+                    mask=mask, step=global_step)
         else:
             # multi gpu support
             # you must make sure that batch size % num gpu == 0
@@ -873,6 +974,8 @@ def train_loop(device, model, data_loaders, optimizer, writer, checkpoint_dir=No
             raise NotImplementedError('Parallel wavenet with quantized input not supported')
         elif hparams.builder == 'clarinet':
             raise NotImplementedError('ClariNet with quantized input not supported')
+        elif hparams.builder == 'clarinet_iaf':
+            raise NotImplementedError('Parallel ClariNet with quantized input not supported')
         else:
             criterion = MaskedCrossEntropyLoss()
     else:
@@ -883,6 +986,11 @@ def train_loop(device, model, data_loaders, optimizer, writer, checkpoint_dir=No
             criterion = ProbabilityDensityDistillationLoss(teacher, writer=writer)
         elif hparams.builder == 'clarinet':
             criterion = SingleGaussianLoss(writer=writer)
+        elif hparams.builder == 'clarinet_iaf':
+            device = torch.device("cuda" if use_cuda else "cpu")
+            teacher = build_model('clarinet').to(device)
+            restore_parts(hparams.teacher_path, teacher)
+            criterion = GaussianDistillationLoss(teacher, writer=writer)
         else:
             criterion = DiscretizedMixturelogisticLoss()
 
@@ -997,7 +1105,10 @@ def build_model(attr=hparams.builder):
         scalar_input=is_scalar_input(hparams.input_type),
     )
 
+    # TODO: change these iaf models to be tuned by hparams
     if attr == 'iaf':
+        model = getattr(builder, attr)()
+    elif attr == 'clarinet_iaf':
         model = getattr(builder, attr)()
     else:
         model = getattr(builder, attr)(**m_params)

@@ -93,6 +93,7 @@ class WaveNet(nn.Module):
         use_speaker_embedding (Bool): Use speaker embedding or Not. Set to False
           if you want to disable embedding layer and use external features
           directly.
+        clarinet (Bool): Whether this is a ClariNet class model or not
     """
 
     def __init__(self, out_channels=256, layers=20, stacks=2,
